@@ -10,32 +10,40 @@ use Illuminate\Http\Request;
 
 class BoardController extends Controller
 {
-    // GET /api/board
-    public function index()
+    // GET /api/board  (butuh auth)
+    public function index(Request $request)
     {
-        $guild   = Guild::first();
-        $quests  = Quest::with('player')->get();
-        $players = Player::orderByDesc('quests_cleared')->get()
+        $user   = $request->user();
+        $player = Player::where('user_id', $user->id)->first();
+        $guild  = $player?->guild ?? Guild::first();
+
+        $quests  = Quest::with('player')->where('guild_id', $guild->id)->get();
+        $players = Player::where('guild_id', $guild->id)
+                         ->orderByDesc('quests_cleared')->get()
                          ->map(fn($p) => array_merge($p->toArray(), ['achievements' => $p->achievements]));
 
         return response()->json([
-            'guild'   => $guild,
-            'quests'  => $quests,
-            'players' => $players,
+            'guild'      => $guild,
+            'quests'     => $quests,
+            'players'    => $players,
+            'my_player'  => $player ? array_merge($player->toArray(), ['achievements' => $player->achievements]) : null,
         ]);
     }
 
     // GET /api/guild
-    public function guild()
+    public function guild(Request $request)
     {
-        return response()->json(Guild::first());
+        $player = Player::where('user_id', $request->user()->id)->first();
+        return response()->json($player?->guild ?? Guild::first());
     }
 
     // ── Quest CRUD ────────────────────────────────────────────
 
-    // POST /api/quests
+    // POST /api/quests  — semua member bisa
     public function store(Request $request)
     {
+        $player = Player::where('user_id', $request->user()->id)->firstOrFail();
+
         $validated = $request->validate([
             'title'       => 'required|string|max:255',
             'description' => 'nullable|string',
@@ -46,19 +54,19 @@ class BoardController extends Controller
             'player_id'   => 'nullable|exists:players,id',
         ]);
 
-        $guild = Guild::first();
         $quest = Quest::create(array_merge($validated, [
-            'guild_id' => $guild->id,
+            'guild_id' => $player->guild_id,
             'status'   => 'available',
         ]));
 
         return response()->json($quest->load('player'), 201);
     }
 
-    // PATCH /api/quests/{id}
+    // PATCH /api/quests/{id}  — semua member bisa update/move
     public function update(Request $request, $id)
     {
-        $quest = Quest::findOrFail($id);
+        $player = Player::where('user_id', $request->user()->id)->firstOrFail();
+        $quest  = Quest::where('guild_id', $player->guild_id)->findOrFail($id);
 
         $validated = $request->validate([
             'title'       => 'sometimes|required|string|max:255',
@@ -78,8 +86,7 @@ class BoardController extends Controller
         $quest->update($validated);
 
         if ($wasCleared) {
-            // Reward ke guild
-            $guild = Guild::first();
+            $guild = $quest->guild ?? Guild::find($player->guild_id);
             $guild->exp  += $quest->reward_exp;
             $guild->gold += $quest->reward_gold;
             while ($guild->exp >= $guild->level * 1000) {
@@ -88,95 +95,88 @@ class BoardController extends Controller
             }
             $guild->save();
 
-            // Reward ke player jika ada
             if ($quest->player_id) {
-                $player = Player::find($quest->player_id);
-                if ($player) {
-                    $player->exp            += $quest->reward_exp;
-                    $player->gold           += $quest->reward_gold;
-                    $player->quests_cleared += 1;
-                    $player->streak         += 1;
-                    if ($player->streak > $player->best_streak) {
-                        $player->best_streak = $player->streak;
+                $qPlayer = Player::find($quest->player_id);
+                if ($qPlayer) {
+                    $qPlayer->exp            += $quest->reward_exp;
+                    $qPlayer->gold           += $quest->reward_gold;
+                    $qPlayer->quests_cleared += 1;
+                    $qPlayer->streak         += 1;
+                    if ($qPlayer->streak > $qPlayer->best_streak) {
+                        $qPlayer->best_streak = $qPlayer->streak;
                     }
-                    while ($player->exp >= $player->level * 500) {
-                        $player->exp   -= $player->level * 500;
-                        $player->level += 1;
+                    while ($qPlayer->exp >= $qPlayer->level * 500) {
+                        $qPlayer->exp   -= $qPlayer->level * 500;
+                        $qPlayer->level += 1;
                     }
-                    $player->save();
+                    $qPlayer->save();
                 }
             }
         }
 
-        // Reset streak kalau quest di-unassign atau di-reopen
         if (isset($validated['status']) && $validated['status'] === 'available' && $quest->player_id) {
-            $player = Player::find($quest->player_id);
-            if ($player && $player->streak > 0) {
-                $player->streak = 0;
-                $player->save();
+            $qPlayer = Player::find($quest->player_id);
+            if ($qPlayer && $qPlayer->streak > 0) {
+                $qPlayer->streak = 0;
+                $qPlayer->save();
             }
         }
 
         return response()->json($quest->load('player'));
     }
 
-    // DELETE /api/quests/{id}
-    public function destroy($id)
+    // DELETE /api/quests/{id}  — hanya Guild Master
+    public function destroy(Request $request, $id)
     {
-        Quest::findOrFail($id)->delete();
+        $player = Player::where('user_id', $request->user()->id)->firstOrFail();
+
+        if ($player->role !== 'guild_master') {
+            return response()->json(['message' => 'Hanya Guild Master yang bisa menghapus quest.'], 403);
+        }
+
+        $quest = Quest::where('guild_id', $player->guild_id)->findOrFail($id);
+        $quest->delete();
+
         return response()->json(['message' => 'Quest dihapus.']);
     }
 
     // ── Player CRUD ───────────────────────────────────────────
 
     // GET /api/players
-    public function players()
+    public function players(Request $request)
     {
-        $players = Player::orderByDesc('quests_cleared')->get()
+        $player  = Player::where('user_id', $request->user()->id)->firstOrFail();
+        $players = Player::where('guild_id', $player->guild_id)
+                         ->orderByDesc('quests_cleared')->get()
                          ->map(fn($p) => array_merge($p->toArray(), ['achievements' => $p->achievements]));
         return response()->json($players);
     }
 
-    // POST /api/players
-    public function storePlayer(Request $request)
+    // DELETE /api/players/{id}  — hanya Guild Master (kick member)
+    public function destroyPlayer(Request $request, $id)
     {
-        $validated = $request->validate([
-            'name'  => 'required|string|max:100',
-            'class' => 'required|in:Warrior,Mage,Rogue,Archer',
-        ]);
+        $me = Player::where('user_id', $request->user()->id)->firstOrFail();
 
-        $avatarMap = [
-            'Warrior' => 'warrior',
-            'Mage'    => 'mage',
-            'Rogue'   => 'rogue',
-            'Archer'  => 'archer',
-        ];
+        if ($me->role !== 'guild_master') {
+            return response()->json(['message' => 'Hanya Guild Master yang bisa kick member.'], 403);
+        }
 
-        $guild  = Guild::first();
-        $player = Player::create([
-            'guild_id' => $guild->id,
-            'name'     => $validated['name'],
-            'class'    => $validated['class'],
-            'avatar'   => $avatarMap[$validated['class']],
-        ]);
+        $target = Player::where('guild_id', $me->guild_id)->findOrFail($id);
 
-        return response()->json(
-            array_merge($player->toArray(), ['achievements' => $player->achievements]),
-            201
-        );
-    }
+        if ($target->role === 'guild_master') {
+            return response()->json(['message' => 'Guild Master tidak bisa di-kick.'], 403);
+        }
 
-    // DELETE /api/players/{id}
-    public function destroyPlayer($id)
-    {
-        Player::findOrFail($id)->delete();
-        return response()->json(['message' => 'Player dihapus.']);
+        $target->delete();
+        return response()->json(['message' => 'Player dikeluarkan dari guild.']);
     }
 
     // GET /api/leaderboard
-    public function leaderboard()
+    public function leaderboard(Request $request)
     {
-        $players = Player::orderByDesc('quests_cleared')
+        $player  = Player::where('user_id', $request->user()->id)->firstOrFail();
+        $players = Player::where('guild_id', $player->guild_id)
+                         ->orderByDesc('quests_cleared')
                          ->orderByDesc('level')
                          ->orderByDesc('exp')
                          ->get()

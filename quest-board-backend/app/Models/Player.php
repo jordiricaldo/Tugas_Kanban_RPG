@@ -7,9 +7,9 @@ use Illuminate\Database\Eloquent\Model;
 class Player extends Model
 {
     protected $fillable = [
-        'guild_id', 'name', 'class', 'avatar',
+        'guild_id', 'user_id', 'name', 'class', 'avatar',
         'level', 'exp', 'gold', 'quests_cleared',
-        'streak', 'best_streak',
+        'streak', 'best_streak', 'role',
     ];
 
     public function guild()
@@ -17,16 +17,19 @@ class Player extends Model
         return $this->belongsTo(Guild::class);
     }
 
+    public function user()
+    {
+        return $this->belongsTo(User::class);
+    }
+
     public function quests()
     {
         return $this->hasMany(Quest::class);
     }
 
-    // Achievements berdasarkan stats
     public function getAchievementsAttribute(): array
     {
         $achievements = [];
-
         if ($this->quests_cleared >= 1)
             $achievements[] = ['id' => 'first_blood', 'name' => 'First Blood', 'icon' => '⚔️', 'desc' => 'Clear quest pertama'];
         if ($this->quests_cleared >= 5)
@@ -43,7 +46,6 @@ class Player extends Model
             $achievements[] = ['id' => 'legend', 'name' => 'Legend', 'icon' => '🌟', 'desc' => 'Mencapai level 10'];
         if ($this->gold >= 5000)
             $achievements[] = ['id' => 'rich', 'name' => 'Gold Hoarder', 'icon' => '💰', 'desc' => 'Kumpulkan 5000 Gold'];
-
         return $achievements;
     }
 }
