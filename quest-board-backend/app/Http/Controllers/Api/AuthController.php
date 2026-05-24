@@ -20,9 +20,9 @@ class AuthController extends Controller
             'email'        => 'required|email|unique:users',
             'password'     => 'required|string|min:6|confirmed',
             'class'        => 'required|in:Warrior,Mage,Rogue,Archer',
-            'action'       => 'required|in:create_guild,join_guild',
-            'guild_name'   => 'required_if:action,create_guild|string|max:100',
-            'invite_code'  => 'required_if:action,join_guild|string',
+            'action'       => 'nullable|in:create_guild,join_guild,skip_guild',
+            'guild_name'   => 'required_if:action,create_guild|nullable|string|max:100',
+            'invite_code'  => 'required_if:action,join_guild|nullable|string',
         ]);
 
         $user = User::create([
@@ -33,7 +33,9 @@ class AuthController extends Controller
 
         $avatarMap = ['Warrior' => 'warrior', 'Mage' => 'mage', 'Rogue' => 'rogue', 'Archer' => 'archer'];
 
-        if ($validated['action'] === 'create_guild') {
+        $action = $validated['action'] ?? 'skip_guild';
+
+        if ($action === 'create_guild') {
             // Buat guild baru, user jadi Guild Master
             $guild = Guild::create([
                 'name'            => $validated['guild_name'],
@@ -48,7 +50,7 @@ class AuthController extends Controller
                 'avatar'   => $avatarMap[$validated['class']],
                 'role'     => 'guild_master',
             ]);
-        } else {
+        } elseif ($action === 'join_guild') {
             // Join guild existing via invite code
             $guild = Guild::where('invite_code', strtoupper($validated['invite_code']))->first();
             if (!$guild) {
@@ -58,6 +60,17 @@ class AuthController extends Controller
 
             $player = Player::create([
                 'guild_id' => $guild->id,
+                'user_id'  => $user->id,
+                'name'     => $validated['name'],
+                'class'    => $validated['class'],
+                'avatar'   => $avatarMap[$validated['class']],
+                'role'     => 'member',
+            ]);
+        } else {
+            // skip_guild — user daftar tanpa guild dulu
+            $guild = null;
+            $player = Player::create([
+                'guild_id' => null,
                 'user_id'  => $user->id,
                 'name'     => $validated['name'],
                 'class'    => $validated['class'],

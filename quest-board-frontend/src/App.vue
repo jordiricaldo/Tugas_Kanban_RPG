@@ -14,7 +14,7 @@ const authError  = ref('');
 
 // Register flow
 const registerStep  = ref(1); // 1=creds, 2=class, 3=guild
-const registerAction = ref('create_guild'); // 'create_guild' | 'join_guild'
+const registerAction = ref('skip_guild'); // 'create_guild' | 'join_guild' | 'skip_guild'
 const registerForm  = ref({
   name: '', email: '', password: '', password_confirmation: '',
   class: 'Warrior', guild_name: '', invite_code: ''
@@ -42,8 +42,21 @@ const isEditing      = ref(false);
 const editingQuestId = ref(null);
 const questForm = ref({ title:'', description:'', rank:'C', reward_exp:50, reward_gold:100, doomsday:'', player_id:'' });
 
+// Modal buat guild (dari no-guild screen)
+const showCreateGuildModal = ref(false);
+const createGuildForm = ref({ guild_name: '' });
+const createGuildLoading = ref(false);
+
 // Guild leaderboard
 const guildLeaderboard = ref([]);
+
+// Guild search & join (untuk user tanpa guild)
+const guildSearchQuery    = ref('');
+const guildSearchResults  = ref([]);
+const guildSearchLoading  = ref(false);
+const myJoinRequests      = ref([]);
+const joinRequests        = ref([]); // untuk GM: pending requests ke guild dia
+const joinRequestsLoading = ref(false);
 
 // Drag
 const draggingId = ref(null);
@@ -73,6 +86,7 @@ const classConfig = {
 // ─── Computed ─────────────────────────────────────────────────────────────────
 const isLoggedIn = computed(() => !!authToken.value && !!authUser.value);
 const isGM       = computed(() => myPlayer.value?.role === 'guild_master');
+const hasGuild   = computed(() => !!myPlayer.value?.guild_id);
 
 const questsByStatus = (status) => questsList.value.filter(q => q.status === status);
 
@@ -93,8 +107,8 @@ const doLogin = async () => {
   authLoading.value = true;
   try {
     const res = await axios.post(`${API}/auth/login`, loginForm.value);
-    setAuth(res.data);
-    await fetchBoard();
+    await setAuth(res.data);
+    if (res.data.player?.guild_id) await fetchBoard();
   } catch (e) {
     authError.value = e.response?.data?.message || Object.values(e.response?.data?.errors || {})[0]?.[0] || 'Login gagal.';
   } finally {
@@ -108,8 +122,8 @@ const doRegister = async () => {
   try {
     const payload = { ...registerForm.value, action: registerAction.value };
     const res = await axios.post(`${API}/auth/register`, payload);
-    setAuth(res.data);
-    await fetchBoard();
+    await setAuth(res.data);
+    if (res.data.player?.guild_id) await fetchBoard();
   } catch (e) {
     authError.value = e.response?.data?.message || Object.values(e.response?.data?.errors || {})[0]?.[0] || 'Registrasi gagal.';
     authLoading.value = false;
@@ -121,13 +135,20 @@ const doLogout = async () => {
   clearAuth();
 };
 
-const setAuth = (data) => {
+const setAuth = async (data) => {
   authToken.value  = data.token;
   authUser.value   = data.user;
   myPlayer.value   = data.player;
   if (data.guild) guildInfo.value = data.guild;
   localStorage.setItem('auth_token', data.token);
   axios.defaults.headers.common['Authorization'] = `Bearer ${data.token}`;
+  // Load join requests jika user belum punya guild
+  if (!data.player?.guild_id) {
+    await fetchMyJoinRequests();
+    await searchGuilds();
+  } else if (data.player?.role === 'guild_master') {
+    await fetchJoinRequests();
+  }
 };
 
 const clearAuth = () => {
@@ -140,6 +161,11 @@ const clearAuth = () => {
   questsList.value  = [];
   playersList.value = [];
   activeView.value  = 'board';
+  // Reset ke halaman login, bukan register
+  authScreen.value   = 'login';
+  registerStep.value = 1;
+  registerAction.value = 'skip_guild';
+  authError.value = '';
 };
 
 const tryRestoreSession = async () => {
@@ -149,7 +175,15 @@ const tryRestoreSession = async () => {
     authUser.value  = res.data.user;
     myPlayer.value  = res.data.player;
     if (res.data.guild) guildInfo.value = res.data.guild;
-    await fetchBoard();
+    if (res.data.player?.guild_id) {
+      await fetchBoard();
+      if (res.data.player?.role === 'guild_master') await fetchJoinRequests();
+    } else {
+      // User tanpa guild: load search + my requests
+      await fetchMyJoinRequests();
+      await searchGuilds();
+      loading.value = false;
+    }
   } catch {
     clearAuth();
     loading.value = false;
@@ -174,6 +208,94 @@ const fetchGuildLeaderboard = async () => {
     const res = await axios.get(`${API}/guilds/leaderboard`);
     guildLeaderboard.value = res.data;
   } catch {}
+};
+
+// ── Guild Search & Join ─────────────────────────────────────────────────────
+const searchGuilds = async () => {
+  guildSearchLoading.value = true;
+  try {
+    const res = await axios.get(`${API}/guilds/search`, { params: { q: guildSearchQuery.value } });
+    guildSearchResults.value = res.data;
+  } catch {
+    showToast('❌ Gagal mencari guild.', 'error');
+  } finally {
+    guildSearchLoading.value = false;
+  }
+};
+
+const requestJoinGuild = async (guildId) => {
+  try {
+    const res = await axios.post(`${API}/guilds/${guildId}/request-join`);
+    showToast(res.data.message || '📨 Request join terkirim!');
+    await fetchMyJoinRequests();
+    // Refresh search results to update status
+    await searchGuilds();
+  } catch (e) {
+    showToast(e.response?.data?.message || '❌ Gagal request join.', 'error');
+  }
+};
+
+const fetchMyJoinRequests = async () => {
+  try {
+    const res = await axios.get(`${API}/guilds/my-requests`);
+    myJoinRequests.value = res.data;
+  } catch {}
+};
+
+// ── GM: Join Requests Management ───────────────────────────────────────────
+const fetchJoinRequests = async () => {
+  joinRequestsLoading.value = true;
+  try {
+    const res = await axios.get(`${API}/guilds/join-requests`);
+    joinRequests.value = res.data;
+  } catch {}
+  finally { joinRequestsLoading.value = false; }
+};
+
+const acceptJoinRequest = async (id, playerName) => {
+  try {
+    const res = await axios.post(`${API}/guilds/join-requests/${id}/accept`);
+    showToast(res.data.message || `✅ ${playerName} bergabung!`);
+    await fetchJoinRequests();
+    await fetchBoard();
+  } catch (e) {
+    showToast(e.response?.data?.message || '❌ Gagal accept.', 'error');
+  }
+};
+
+const rejectJoinRequest = async (id, playerName) => {
+  try {
+    await axios.post(`${API}/guilds/join-requests/${id}/reject`);
+    showToast(`❌ Request dari ${playerName} ditolak.`);
+    await fetchJoinRequests();
+  } catch (e) {
+    showToast(e.response?.data?.message || '❌ Gagal reject.', 'error');
+  }
+};
+
+// helper: cek apakah sudah ada pending request ke guild tertentu
+const hasPendingRequest = (guildId) =>
+  myJoinRequests.value.some(r => r.guild?.id === guildId && r.status === 'pending');
+
+// Buat guild dari dalam app (user sudah login tapi belum punya guild)
+const createGuildFromApp = async () => {
+  if (!createGuildForm.value.guild_name.trim()) {
+    showToast('❌ Nama guild tidak boleh kosong.', 'error'); return;
+  }
+  createGuildLoading.value = true;
+  try {
+    const res = await axios.post(`${API}/guilds/create`, { guild_name: createGuildForm.value.guild_name });
+    myPlayer.value = res.data.player;
+    guildInfo.value = res.data.guild;
+    showCreateGuildModal.value = false;
+    showToast(`⚜ Guild "${res.data.guild.name}" berhasil dibuat!`);
+    await fetchBoard();
+    await fetchJoinRequests();
+  } catch (e) {
+    showToast(e.response?.data?.message || '❌ Gagal membuat guild.', 'error');
+  } finally {
+    createGuildLoading.value = false;
+  }
 };
 
 const refreshGuild = async () => {
@@ -272,6 +394,11 @@ const closeQuestModal = () => { showQuestModal.value = false; };
 const switchToGuildLB = () => {
   fetchGuildLeaderboard();
   activeView.value = 'guild_lb';
+};
+
+const switchToPlayers = () => {
+  activeView.value = 'players';
+  if (isGM.value) fetchJoinRequests();
 };
 
 // ─── Drag & Drop ──────────────────────────────────────────────────────────────
@@ -455,22 +582,33 @@ onMounted(tryRestoreSession);
 
         <!-- REGISTER — Step 3: Guild -->
         <div v-else-if="authScreen === 'register' && registerStep === 3" class="auth-panel">
-          <div class="auth-panel-title">BERGABUNG GUILD — 3/3</div>
+          <div class="auth-panel-title">PILIH GUILD — 3/3</div>
           <div class="auth-step-dots">
             <span class="dot active"></span><span class="dot active"></span><span class="dot active"></span>
           </div>
           <div class="auth-guild-tabs">
             <button
+              :class="['auth-tab', registerAction==='skip_guild' && 'active']"
+              @click="registerAction='skip_guild'"
+            >🚶 LEWATI</button>
+            <button
               :class="['auth-tab', registerAction==='create_guild' && 'active']"
               @click="registerAction='create_guild'"
-            >⚜ BUAT GUILD</button>
+            >⛜ BUAT GUILD</button>
             <button
               :class="['auth-tab', registerAction==='join_guild' && 'active']"
               @click="registerAction='join_guild'"
             >🔗 JOIN GUILD</button>
           </div>
           <div class="auth-fields">
-            <template v-if="registerAction === 'create_guild'">
+            <template v-if="registerAction === 'skip_guild'">
+              <div class="auth-guild-info">
+                <span>🚶 Kamu bisa bergabung guild nanti</span>
+                <span>📜 Akun langsung dibuat tanpa guild</span>
+                <span>💡 Minta invite code dari Guild Master untuk bergabung</span>
+              </div>
+            </template>
+            <template v-else-if="registerAction === 'create_guild'">
               <div class="auth-field">
                 <label>NAMA GUILD BARU</label>
                 <input v-model="registerForm.guild_name" placeholder="Shadow Dragons, Iron Wolves..." maxlength="100" />
@@ -479,7 +617,7 @@ onMounted(tryRestoreSession);
                 <span>⭐ Kamu akan jadi <strong>Guild Master</strong></span>
                 <span>🔑 Invite code akan dibuat otomatis</span>
                 <span>⚔ Semua member bisa post quest</span>
-                <span>🗑 Hanya GM yang bisa hapus quest & kick member</span>
+                <span>🗑 Hanya GM yang bisa hapus quest &amp; kick member</span>
               </div>
             </template>
             <template v-else>
@@ -514,12 +652,12 @@ onMounted(tryRestoreSession);
         <div class="nav-brand">
           <span class="brand-icon">⚜</span>
           <div class="brand-text">
-            <span class="brand-name">{{ guildInfo.name }}</span>
+            <span class="brand-name">{{ hasGuild ? guildInfo.name : 'DARK GUILD SYSTEM' }}</span>
             <span class="brand-sub">DARK GUILD SYSTEM v2.0</span>
           </div>
         </div>
 
-        <div class="nav-guild-stats">
+        <div v-if="hasGuild" class="nav-guild-stats">
           <div class="guild-stat">
             <span class="gstat-label">LEVEL</span>
             <span class="gstat-val gold-glow">{{ guildInfo.level }}</span>
@@ -539,10 +677,10 @@ onMounted(tryRestoreSession);
           </div>
         </div>
 
-        <div class="nav-tabs">
+        <div v-if="hasGuild" class="nav-tabs">
           <button :class="['nav-tab', activeView==='board' && 'active']"       @click="activeView='board'">📋 BOARD</button>
           <button :class="['nav-tab', activeView==='leaderboard' && 'active']" @click="activeView='leaderboard'">🏆 RANKING</button>
-          <button :class="['nav-tab', activeView==='players' && 'active']"     @click="activeView='players'">⚔️ PARTY</button>
+          <button :class="['nav-tab', activeView==='players' && 'active']"     @click="switchToPlayers">⚔️ PARTY<span v-if="isGM && joinRequests.length" class="notif-dot">{{ joinRequests.length }}</span></button>
           <button :class="['nav-tab', activeView==='guild_lb' && 'active']"    @click="switchToGuildLB">🌐 GUILDS</button>
         </div>
 
@@ -553,15 +691,74 @@ onMounted(tryRestoreSession);
             <div class="nav-me-info">
               <span class="nav-me-name">{{ myPlayer.name }}</span>
               <span class="nav-me-role" :style="{ color: isGM ? '#ffd700' : '#5a5a8a' }">
-                {{ isGM ? '👑 GM' : '⚔ Member' }}
+                {{ isGM ? '👑 GM' : hasGuild ? '⚔ Member' : '🚶 No Guild' }}
               </span>
             </div>
           </div>
           <button class="pixel-btn ghost nav-logout" @click="doLogout" title="Logout">↩ LOGOUT</button>
         </div>
 
-        <button class="btn-post-quest pixel-btn" @click="openCreateQuest">+ POST QUEST</button>
+        <button v-if="hasGuild" class="btn-post-quest pixel-btn" @click="openCreateQuest">+ POST QUEST</button>
       </nav>
+
+      <!-- ══ NO-GUILD SCREEN ══════════════════════════════════════ -->
+      <div v-if="!hasGuild" class="no-guild-screen">
+        <div class="no-guild-header">
+          <div class="no-guild-icon">🏰</div>
+          <h2 class="no-guild-title">BELUM ADA GUILD</h2>
+          <p class="no-guild-sub">Cari guild untuk bergabung, atau buat guild baru</p>
+        </div>
+
+        <!-- Status request join yang sudah dikirim -->
+        <div v-if="myJoinRequests.length" class="my-requests-box">
+          <div class="my-req-title">📨 Request Join Kamu</div>
+          <div v-for="req in myJoinRequests" :key="req.id" class="my-req-row">
+            <span class="req-guild-name">{{ req.guild?.name }}</span>
+            <span :class="['req-status', `req-${req.status}`]">
+              {{ req.status === 'pending' ? '⏳ Menunggu' : req.status === 'accepted' ? '✅ Diterima' : '❌ Ditolak' }}
+            </span>
+          </div>
+        </div>
+
+        <!-- Search guild -->
+        <div class="guild-search-box">
+          <div class="gs-search-row">
+            <input
+              v-model="guildSearchQuery"
+              class="gs-input"
+              placeholder="🔍 Cari nama guild..."
+              @keyup.enter="searchGuilds"
+            />
+            <button class="pixel-btn gs-btn" :disabled="guildSearchLoading" @click="searchGuilds">
+              {{ guildSearchLoading ? '...' : 'CARI' }}
+            </button>
+          </div>
+
+          <div v-if="guildSearchResults.length" class="gs-results">
+            <div v-for="g in guildSearchResults" :key="g.id" class="gs-row">
+              <div class="gs-info">
+                <span class="gs-name">⚜ {{ g.name }}</span>
+                <span class="gs-meta">Lv.{{ g.level }} · {{ g.players_count }} member</span>
+              </div>
+              <button
+                v-if="!hasPendingRequest(g.id)"
+                class="pixel-btn gs-join-btn"
+                @click="requestJoinGuild(g.id)"
+              >📨 REQUEST JOIN</button>
+              <span v-else class="gs-pending-badge">⏳ PENDING</span>
+            </div>
+          </div>
+          <div v-else-if="!guildSearchLoading" class="gs-empty">
+            Tidak ada guild ditemukan. Coba kata kunci lain.
+          </div>
+        </div>
+
+        <!-- Buat guild baru dari sini -->
+        <div class="no-guild-create">
+          <div class="ngc-label">— atau —</div>
+          <button class="pixel-btn ngc-btn" @click="showCreateGuildModal = true">⚜ BUAT GUILD BARU</button>
+        </div>
+      </div>
 
       <!-- LOADING -->
       <div v-if="loading" class="loading-dungeon">
@@ -710,6 +907,28 @@ onMounted(tryRestoreSession);
             <div v-if="guildInfo.invite_code" class="invite-code-box">
               <span class="invite-label">INVITE CODE</span>
               <span class="invite-code">{{ guildInfo.invite_code }}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- GM: Join Requests Panel -->
+        <div v-if="isGM" class="join-requests-panel">
+          <div class="jrp-header" @click="joinRequestsLoading || fetchJoinRequests()">
+            <span class="jrp-title">📨 JOIN REQUESTS</span>
+            <span v-if="joinRequests.length" class="jrp-count">{{ joinRequests.length }} pending</span>
+            <span v-else class="jrp-empty-label">Tidak ada request baru</span>
+          </div>
+          <div v-if="joinRequests.length" class="jrp-list">
+            <div v-for="req in joinRequests" :key="req.id" class="jrp-row">
+              <div v-html="pixelAvatar(req.player.class)" style="transform:scale(0.5);flex-shrink:0"></div>
+              <div class="jrp-info">
+                <span class="jrp-name">{{ req.player.name }}</span>
+                <span class="jrp-meta">{{ req.player.class }} · Lv.{{ req.player.level }} · {{ req.player.quests_cleared }} quest cleared</span>
+              </div>
+              <div class="jrp-actions">
+                <button class="pixel-btn jrp-accept" @click="acceptJoinRequest(req.id, req.player.name)">✅ TERIMA</button>
+                <button class="pixel-btn jrp-reject" @click="rejectJoinRequest(req.id, req.player.name)">❌ TOLAK</button>
+              </div>
             </div>
           </div>
         </div>
@@ -889,6 +1108,34 @@ onMounted(tryRestoreSession);
             <div class="dm-foot">
               <button class="pixel-btn ghost" @click="closeQuestModal">CANCEL</button>
               <button class="pixel-btn" @click="submitQuestForm">{{ isEditing ? 'SAVE' : 'POST' }}</button>
+            </div>
+          </div>
+        </div>
+      </Transition>
+
+      <!-- Modal: Buat Guild Baru (dari no-guild screen) -->
+      <Transition name="modal">
+        <div v-if="showCreateGuildModal" class="modal-veil" @click.self="showCreateGuildModal = false">
+          <div class="dungeon-modal narrow">
+            <div class="dm-head">
+              <span>⚜ BUAT GUILD BARU</span>
+              <button class="dm-close" @click="showCreateGuildModal = false">✕</button>
+            </div>
+            <div class="dm-body">
+              <div class="field">
+                <label>NAMA GUILD</label>
+                <input v-model="createGuildForm.guild_name" placeholder="Shadow Dragons, Iron Wolves..." maxlength="100" @keyup.enter="createGuildFromApp" />
+              </div>
+              <div class="auth-guild-info">
+                <span>⭐ Kamu akan jadi <strong>Guild Master</strong></span>
+                <span>🔑 Invite code akan dibuat otomatis</span>
+              </div>
+            </div>
+            <div class="dm-foot">
+              <button class="pixel-btn ghost" @click="showCreateGuildModal = false">BATAL</button>
+              <button class="pixel-btn" :disabled="createGuildLoading" @click="createGuildFromApp">
+                {{ createGuildLoading ? 'LOADING...' : '⚜ BUAT' }}
+              </button>
             </div>
           </div>
         </div>
@@ -1262,4 +1509,67 @@ body { font-family: var(--vt); font-size: 18px; overflow-x: hidden; }
 .dm-foot { display: flex; justify-content: flex-end; gap: .6rem; padding: .8rem 1rem; border-top: 1px solid var(--border); background: var(--panel2); }
 .modal-enter-active, .modal-leave-active { transition: all .2s; }
 .modal-enter-from, .modal-leave-to { opacity: 0; transform: scale(.96); }
+
+/* ── Notif dot on nav tab ─────────────────────────────────── */
+.notif-dot { display: inline-flex; align-items: center; justify-content: center; background: var(--red); color: #fff; font-family: var(--pixel); font-size: .3rem; border-radius: 0; min-width: 1.2em; padding: .15em .3em; margin-left: .3rem; vertical-align: middle; }
+
+/* ── No-Guild Screen ──────────────────────────────────────── */
+.no-guild-screen { max-width: 700px; margin: 3rem auto; padding: 0 1rem; display: flex; flex-direction: column; gap: 1.5rem; }
+.no-guild-header { text-align: center; }
+.no-guild-icon { font-size: 3rem; margin-bottom: .5rem; opacity: .5; }
+.no-guild-title { font-family: var(--pixel); font-size: .8rem; color: var(--gold); text-shadow: 0 0 20px rgba(255,215,0,.4); letter-spacing: .1em; margin-bottom: .4rem; }
+.no-guild-sub { color: var(--muted); font-size: 1rem; }
+
+/* My join requests status */
+.my-requests-box { background: var(--panel); border: 1px solid var(--border2); padding: .8rem 1rem; }
+.my-req-title { font-family: var(--pixel); font-size: .42rem; color: var(--muted); margin-bottom: .6rem; letter-spacing: .08em; }
+.my-req-row { display: flex; align-items: center; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid var(--border); }
+.my-req-row:last-child { border-bottom: none; }
+.req-guild-name { font-size: 1rem; color: var(--text); }
+.req-status { font-family: var(--pixel); font-size: .35rem; padding: .2rem .5rem; border: 1px solid; }
+.req-pending  { color: #f0b429; border-color: #f0b42944; background: rgba(240,180,41,.08); }
+.req-accepted { color: #22c55e; border-color: #22c55e44; background: rgba(34,197,94,.08); }
+.req-rejected { color: var(--red); border-color: rgba(239,68,68,.3); background: rgba(239,68,68,.08); }
+
+/* Guild Search */
+.guild-search-box { background: var(--panel); border: 1px solid var(--border2); }
+.gs-search-row { display: flex; gap: .5rem; padding: .8rem; border-bottom: 1px solid var(--border); }
+.gs-input { flex: 1; background: var(--panel2); border: 1px solid var(--border2); color: var(--text); padding: .5rem .7rem; font-family: var(--vt); font-size: 1rem; outline: none; transition: border-color .2s; }
+.gs-input:focus { border-color: var(--purple); }
+.gs-btn { padding: .4rem .9rem; font-size: .4rem; }
+.gs-results { display: flex; flex-direction: column; }
+.gs-row { display: flex; align-items: center; justify-content: space-between; padding: .7rem 1rem; border-bottom: 1px solid var(--border); gap: .5rem; flex-wrap: wrap; }
+.gs-row:last-child { border-bottom: none; }
+.gs-row:hover { background: rgba(255,255,255,.02); }
+.gs-info { display: flex; flex-direction: column; gap: .2rem; flex: 1; }
+.gs-name { font-family: var(--pixel); font-size: .45rem; color: var(--gold); }
+.gs-meta { font-size: .85rem; color: var(--muted); }
+.gs-join-btn { font-family: var(--pixel); font-size: .35rem; padding: .3rem .7rem; border: 1px solid var(--purple); color: #a78bfa; background: rgba(124,106,247,.1); cursor: pointer; transition: all .2s; }
+.gs-join-btn:hover { background: rgba(124,106,247,.25); }
+.gs-pending-badge { font-family: var(--pixel); font-size: .35rem; color: #f0b429; border: 1px solid #f0b42944; padding: .3rem .6rem; background: rgba(240,180,41,.08); }
+.gs-empty { text-align: center; padding: 2rem; color: var(--muted); font-size: .9rem; }
+
+/* Buat guild dari no-guild */
+.no-guild-create { text-align: center; }
+.ngc-label { color: var(--muted); font-size: .9rem; margin-bottom: .8rem; }
+.ngc-btn { font-size: .45rem; padding: .6rem 1.5rem; border-color: var(--gold); color: var(--gold); background: rgba(255,215,0,.08); }
+.ngc-btn:hover { background: rgba(255,215,0,.18); }
+
+/* ── GM Join Requests Panel ───────────────────────────────── */
+.join-requests-panel { background: var(--panel); border: 1px solid var(--border2); margin-bottom: 1.5rem; }
+.jrp-header { display: flex; align-items: center; gap: .8rem; padding: .6rem 1rem; background: var(--panel2); border-bottom: 1px solid var(--border); cursor: pointer; }
+.jrp-title { font-family: var(--pixel); font-size: .45rem; color: var(--gold); letter-spacing: .08em; }
+.jrp-count { font-family: var(--pixel); font-size: .38rem; color: var(--red); background: rgba(239,68,68,.12); border: 1px solid rgba(239,68,68,.3); padding: .15rem .4rem; }
+.jrp-empty-label { font-size: .85rem; color: var(--muted); }
+.jrp-list { display: flex; flex-direction: column; }
+.jrp-row { display: flex; align-items: center; gap: .6rem; padding: .6rem 1rem; border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+.jrp-row:last-child { border-bottom: none; }
+.jrp-info { flex: 1; display: flex; flex-direction: column; gap: .2rem; }
+.jrp-name { font-family: var(--pixel); font-size: .45rem; color: var(--text); }
+.jrp-meta { font-size: .85rem; color: var(--muted); }
+.jrp-actions { display: flex; gap: .4rem; }
+.jrp-accept { font-family: var(--pixel); font-size: .35rem; padding: .25rem .6rem; border: 1px solid #22c55e44; color: #22c55e; background: rgba(34,197,94,.08); cursor: pointer; transition: all .2s; }
+.jrp-accept:hover { background: rgba(34,197,94,.2); }
+.jrp-reject { font-family: var(--pixel); font-size: .35rem; padding: .25rem .6rem; border: 1px solid rgba(239,68,68,.3); color: var(--red); background: rgba(239,68,68,.08); cursor: pointer; transition: all .2s; }
+.jrp-reject:hover { background: rgba(239,68,68,.2); }
 </style>
