@@ -57,7 +57,7 @@ const guildSearchLoading  = ref(false);
 const myJoinRequests      = ref([]);
 const joinRequests        = ref([]); // untuk GM: pending requests ke guild dia
 const joinRequestsLoading = ref(false);
-const noGuildTab = ref('status'); // 'status' | 'search' | 'create'
+const noGuildTab = ref('search'); // 'status' | 'search' | 'create'
 
 // Drag
 const draggingId = ref(null);
@@ -232,6 +232,7 @@ const requestJoinGuild = async (guildId) => {
     const res = await axios.post(`${API}/guilds/${guildId}/request-join`);
     showToast(res.data.message || '📨 Request join terkirim!');
     await fetchMyJoinRequests();
+    noGuildTab.value = 'status'; // Pindah ke tab status agar user bisa lihat request-nya
     // Refresh search results secara silent (hanya kalau query ada)
     if (guildSearchQuery.value.trim()) await searchGuilds(true);
   } catch (e) {
@@ -715,7 +716,11 @@ onMounted(tryRestoreSession);
 
         <!-- Tab navigation -->
         <div class="ng-tabs">
-          <button :class="['ng-tab', noGuildTab === 'status' && 'active']" @click="noGuildTab = 'status'">
+          <button
+            v-if="myJoinRequests.length"
+            :class="['ng-tab', noGuildTab === 'status' && 'active']"
+            @click="noGuildTab = 'status'"
+          >
             📨 STATUS REQUEST
             <span v-if="myJoinRequests.filter(r => r.status === 'pending').length" class="ng-tab-badge">
               {{ myJoinRequests.filter(r => r.status === 'pending').length }}
