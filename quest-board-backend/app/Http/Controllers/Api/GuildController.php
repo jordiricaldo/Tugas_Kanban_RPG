@@ -43,7 +43,7 @@ class GuildController extends Controller
             'guild'  => $guild,
         ]);
     }
-
+    
     // GET /api/guilds/search?q=nama  — cari guild publik
     public function search(Request $request)
     {

@@ -57,6 +57,7 @@ const guildSearchLoading  = ref(false);
 const myJoinRequests      = ref([]);
 const joinRequests        = ref([]); // untuk GM: pending requests ke guild dia
 const joinRequestsLoading = ref(false);
+const noGuildTab = ref('status'); // 'status' | 'search' | 'create'
 
 // Drag
 const draggingId = ref(null);
@@ -145,7 +146,6 @@ const setAuth = async (data) => {
   // Load join requests jika user belum punya guild
   if (!data.player?.guild_id) {
     await fetchMyJoinRequests();
-    await searchGuilds();
   } else if (data.player?.role === 'guild_master') {
     await fetchJoinRequests();
   }
@@ -179,9 +179,8 @@ const tryRestoreSession = async () => {
       await fetchBoard();
       if (res.data.player?.role === 'guild_master') await fetchJoinRequests();
     } else {
-      // User tanpa guild: load search + my requests
+      // User tanpa guild: hanya load my requests, search dilakukan user
       await fetchMyJoinRequests();
-      await searchGuilds();
       loading.value = false;
     }
   } catch {
@@ -211,13 +210,18 @@ const fetchGuildLeaderboard = async () => {
 };
 
 // ── Guild Search & Join ─────────────────────────────────────────────────────
-const searchGuilds = async () => {
+const searchGuilds = async (silent = false) => {
+  // Kalau query kosong, reset hasil saja tanpa call API
+  if (!guildSearchQuery.value.trim()) {
+    guildSearchResults.value = [];
+    return;
+  }
   guildSearchLoading.value = true;
   try {
     const res = await axios.get(`${API}/guilds/search`, { params: { q: guildSearchQuery.value } });
     guildSearchResults.value = res.data;
   } catch {
-    showToast('❌ Gagal mencari guild.', 'error');
+    if (!silent) showToast('❌ Gagal mencari guild.', 'error');
   } finally {
     guildSearchLoading.value = false;
   }
@@ -228,8 +232,8 @@ const requestJoinGuild = async (guildId) => {
     const res = await axios.post(`${API}/guilds/${guildId}/request-join`);
     showToast(res.data.message || '📨 Request join terkirim!');
     await fetchMyJoinRequests();
-    // Refresh search results to update status
-    await searchGuilds();
+    // Refresh search results secara silent (hanya kalau query ada)
+    if (guildSearchQuery.value.trim()) await searchGuilds(true);
   } catch (e) {
     showToast(e.response?.data?.message || '❌ Gagal request join.', 'error');
   }
@@ -706,57 +710,115 @@ onMounted(tryRestoreSession);
         <div class="no-guild-header">
           <div class="no-guild-icon">🏰</div>
           <h2 class="no-guild-title">BELUM ADA GUILD</h2>
-          <p class="no-guild-sub">Cari guild untuk bergabung, atau buat guild baru</p>
+          <p class="no-guild-sub">Selamat datang, <strong>{{ myPlayer?.name }}</strong>! Pilih salah satu opsi di bawah.</p>
         </div>
 
-        <!-- Status request join yang sudah dikirim -->
-        <div v-if="myJoinRequests.length" class="my-requests-box">
-          <div class="my-req-title">📨 Request Join Kamu</div>
-          <div v-for="req in myJoinRequests" :key="req.id" class="my-req-row">
-            <span class="req-guild-name">{{ req.guild?.name }}</span>
-            <span :class="['req-status', `req-${req.status}`]">
-              {{ req.status === 'pending' ? '⏳ Menunggu' : req.status === 'accepted' ? '✅ Diterima' : '❌ Ditolak' }}
+        <!-- Tab navigation -->
+        <div class="ng-tabs">
+          <button :class="['ng-tab', noGuildTab === 'status' && 'active']" @click="noGuildTab = 'status'">
+            📨 STATUS REQUEST
+            <span v-if="myJoinRequests.filter(r => r.status === 'pending').length" class="ng-tab-badge">
+              {{ myJoinRequests.filter(r => r.status === 'pending').length }}
             </span>
-          </div>
+          </button>
+          <button :class="['ng-tab', noGuildTab === 'search' && 'active']" @click="noGuildTab = 'search'">
+            🔍 CARI GUILD
+          </button>
+          <button :class="['ng-tab', noGuildTab === 'create' && 'active']" @click="noGuildTab = 'create'">
+            ⚜ BUAT GUILD
+          </button>
         </div>
 
-        <!-- Search guild -->
-        <div class="guild-search-box">
-          <div class="gs-search-row">
-            <input
-              v-model="guildSearchQuery"
-              class="gs-input"
-              placeholder="🔍 Cari nama guild..."
-              @keyup.enter="searchGuilds"
-            />
-            <button class="pixel-btn gs-btn" :disabled="guildSearchLoading" @click="searchGuilds">
-              {{ guildSearchLoading ? '...' : 'CARI' }}
-            </button>
-          </div>
-
-          <div v-if="guildSearchResults.length" class="gs-results">
-            <div v-for="g in guildSearchResults" :key="g.id" class="gs-row">
-              <div class="gs-info">
-                <span class="gs-name">⚜ {{ g.name }}</span>
-                <span class="gs-meta">Lv.{{ g.level }} · {{ g.players_count }} member</span>
+        <!-- Tab: Status Request -->
+        <div v-if="noGuildTab === 'status'" class="ng-tab-content">
+          <div v-if="myJoinRequests.length" class="my-requests-box">
+            <div class="my-req-title">📨 Request Join Kamu</div>
+            <div v-for="req in myJoinRequests" :key="req.id" class="my-req-row">
+              <div class="req-guild-info">
+                <span class="req-guild-name">⚜ {{ req.guild?.name }}</span>
+                <span class="req-guild-level">Lv.{{ req.guild?.level }}</span>
               </div>
-              <button
-                v-if="!hasPendingRequest(g.id)"
-                class="pixel-btn gs-join-btn"
-                @click="requestJoinGuild(g.id)"
-              >📨 REQUEST JOIN</button>
-              <span v-else class="gs-pending-badge">⏳ PENDING</span>
+              <span :class="['req-status', `req-${req.status}`]">
+                {{ req.status === 'pending' ? '⏳ Menunggu' : req.status === 'accepted' ? '✅ Diterima' : '❌ Ditolak' }}
+              </span>
             </div>
           </div>
-          <div v-else-if="!guildSearchLoading" class="gs-empty">
-            Tidak ada guild ditemukan. Coba kata kunci lain.
+          <div v-else class="ng-empty-state">
+            <div class="ng-empty-icon">📭</div>
+            <p class="ng-empty-text">Belum ada request join yang dikirim.</p>
+            <button class="pixel-btn ng-empty-btn" @click="noGuildTab = 'search'">🔍 Cari Guild Sekarang</button>
           </div>
         </div>
 
-        <!-- Buat guild baru dari sini -->
-        <div class="no-guild-create">
-          <div class="ngc-label">— atau —</div>
-          <button class="pixel-btn ngc-btn" @click="showCreateGuildModal = true">⚜ BUAT GUILD BARU</button>
+        <!-- Tab: Cari Guild -->
+        <div v-else-if="noGuildTab === 'search'" class="ng-tab-content">
+          <div class="guild-search-box">
+            <div class="gs-search-row">
+              <input
+                v-model="guildSearchQuery"
+                class="gs-input"
+                placeholder="Ketik nama guild lalu tekan CARI..."
+                @keyup.enter="searchGuilds"
+              />
+              <button class="pixel-btn gs-btn" :disabled="guildSearchLoading" @click="searchGuilds">
+                {{ guildSearchLoading ? '...' : 'CARI' }}
+              </button>
+            </div>
+
+            <div v-if="guildSearchLoading" class="gs-empty">⏳ Mencari guild...</div>
+            <div v-else-if="guildSearchResults.length" class="gs-results">
+              <div v-for="g in guildSearchResults" :key="g.id" class="gs-row">
+                <div class="gs-info">
+                  <span class="gs-name">⚜ {{ g.name }}</span>
+                  <span class="gs-meta">Lv.{{ g.level }} · {{ g.players_count }} member</span>
+                </div>
+                <button
+                  v-if="!hasPendingRequest(g.id)"
+                  class="pixel-btn gs-join-btn"
+                  @click="requestJoinGuild(g.id)"
+                >📨 REQUEST JOIN</button>
+                <span v-else class="gs-pending-badge">⏳ PENDING</span>
+              </div>
+            </div>
+            <div v-else-if="guildSearchQuery" class="gs-empty">
+              Tidak ada guild dengan nama "<strong>{{ guildSearchQuery }}</strong>". Coba kata kunci lain.
+            </div>
+            <div v-else class="gs-empty">
+              Ketik nama guild yang ingin kamu cari, lalu tekan CARI.
+            </div>
+          </div>
+        </div>
+
+        <!-- Tab: Buat Guild -->
+        <div v-else-if="noGuildTab === 'create'" class="ng-tab-content">
+          <div class="ng-create-panel">
+            <div class="ng-create-icon">⚜</div>
+            <p class="ng-create-desc">Buat guild sendiri dan jadi <strong>Guild Master</strong>. Kamu bisa mengundang member lain dengan invite code yang dibuat otomatis.</p>
+            <div class="ng-create-field">
+              <label class="ng-create-label">NAMA GUILD</label>
+              <input
+                v-model="createGuildForm.guild_name"
+                class="ng-create-input"
+                placeholder="Shadow Dragons, Iron Wolves..."
+                maxlength="100"
+                @keyup.enter="createGuildFromApp"
+              />
+            </div>
+            <div class="auth-guild-info" style="margin-top:.5rem">
+              <span>⭐ Kamu akan jadi <strong>Guild Master</strong></span>
+              <span>🔑 Invite code dibuat otomatis</span>
+              <span>⚔ Member bisa post dan kerjakan quest</span>
+              <span>🗑 Hanya GM yang bisa hapus quest & kick member</span>
+            </div>
+            <button
+              class="pixel-btn ngc-btn"
+              :disabled="createGuildLoading"
+              @click="createGuildFromApp"
+              style="margin-top:1rem;width:100%"
+            >
+              {{ createGuildLoading ? 'LOADING...' : '⚜ BUAT GUILD SEKARANG' }}
+            </button>
+          </div>
         </div>
       </div>
 
@@ -1514,25 +1576,44 @@ body { font-family: var(--vt); font-size: 18px; overflow-x: hidden; }
 .notif-dot { display: inline-flex; align-items: center; justify-content: center; background: var(--red); color: #fff; font-family: var(--pixel); font-size: .3rem; border-radius: 0; min-width: 1.2em; padding: .15em .3em; margin-left: .3rem; vertical-align: middle; }
 
 /* ── No-Guild Screen ──────────────────────────────────────── */
-.no-guild-screen { max-width: 700px; margin: 3rem auto; padding: 0 1rem; display: flex; flex-direction: column; gap: 1.5rem; }
-.no-guild-header { text-align: center; }
-.no-guild-icon { font-size: 3rem; margin-bottom: .5rem; opacity: .5; }
-.no-guild-title { font-family: var(--pixel); font-size: .8rem; color: var(--gold); text-shadow: 0 0 20px rgba(255,215,0,.4); letter-spacing: .1em; margin-bottom: .4rem; }
+.no-guild-screen { max-width: 700px; margin: 2rem auto; padding: 0 1rem; display: flex; flex-direction: column; gap: 1.2rem; }
+.no-guild-header { text-align: center; padding: 1rem 0 .5rem; }
+.no-guild-icon { font-size: 3rem; margin-bottom: .5rem; opacity: .6; }
+.no-guild-title { font-family: var(--pixel); font-size: .8rem; color: var(--gold); text-shadow: 0 0 20px rgba(255,215,0,.4); letter-spacing: .1em; margin-bottom: .5rem; }
 .no-guild-sub { color: var(--muted); font-size: 1rem; }
+.no-guild-sub strong { color: var(--text); }
+
+/* Tab bar */
+.ng-tabs { display: flex; border-bottom: 2px solid var(--border2); }
+.ng-tab { flex: 1; font-family: var(--pixel); font-size: .38rem; padding: .7rem .5rem; background: none; border: none; border-bottom: 3px solid transparent; color: var(--muted); cursor: pointer; transition: all .2s; position: relative; display: flex; align-items: center; justify-content: center; gap: .4rem; letter-spacing: .05em; margin-bottom: -2px; }
+.ng-tab:hover { color: var(--text); background: rgba(255,255,255,.03); }
+.ng-tab.active { color: var(--gold); border-bottom-color: var(--gold); background: rgba(255,215,0,.04); }
+.ng-tab-badge { background: var(--red); color: #fff; font-family: var(--pixel); font-size: .28rem; border-radius: 0; min-width: 1.2em; padding: .15em .3em; }
+
+/* Tab content */
+.ng-tab-content { background: var(--panel); border: 1px solid var(--border2); border-top: none; min-height: 260px; }
+
+/* Empty state */
+.ng-empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 3rem 1rem; gap: .8rem; text-align: center; }
+.ng-empty-icon { font-size: 2.5rem; opacity: .4; }
+.ng-empty-text { color: var(--muted); font-size: 1rem; }
+.ng-empty-btn { font-family: var(--pixel); font-size: .38rem; padding: .5rem 1rem; border-color: var(--purple); color: #a78bfa; background: rgba(124,106,247,.1); }
 
 /* My join requests status */
-.my-requests-box { background: var(--panel); border: 1px solid var(--border2); padding: .8rem 1rem; }
+.my-requests-box { padding: .8rem 1rem; }
 .my-req-title { font-family: var(--pixel); font-size: .42rem; color: var(--muted); margin-bottom: .6rem; letter-spacing: .08em; }
-.my-req-row { display: flex; align-items: center; justify-content: space-between; padding: .4rem 0; border-bottom: 1px solid var(--border); }
+.my-req-row { display: flex; align-items: center; justify-content: space-between; padding: .5rem 0; border-bottom: 1px solid var(--border); gap: .5rem; flex-wrap: wrap; }
 .my-req-row:last-child { border-bottom: none; }
+.req-guild-info { display: flex; flex-direction: column; gap: .15rem; }
 .req-guild-name { font-size: 1rem; color: var(--text); }
-.req-status { font-family: var(--pixel); font-size: .35rem; padding: .2rem .5rem; border: 1px solid; }
+.req-guild-level { font-family: var(--pixel); font-size: .32rem; color: var(--muted); }
+.req-status { font-family: var(--pixel); font-size: .35rem; padding: .2rem .5rem; border: 1px solid; flex-shrink: 0; }
 .req-pending  { color: #f0b429; border-color: #f0b42944; background: rgba(240,180,41,.08); }
 .req-accepted { color: #22c55e; border-color: #22c55e44; background: rgba(34,197,94,.08); }
 .req-rejected { color: var(--red); border-color: rgba(239,68,68,.3); background: rgba(239,68,68,.08); }
 
-/* Guild Search */
-.guild-search-box { background: var(--panel); border: 1px solid var(--border2); }
+/* Guild Search (inside tab) */
+.guild-search-box { display: flex; flex-direction: column; }
 .gs-search-row { display: flex; gap: .5rem; padding: .8rem; border-bottom: 1px solid var(--border); }
 .gs-input { flex: 1; background: var(--panel2); border: 1px solid var(--border2); color: var(--text); padding: .5rem .7rem; font-family: var(--vt); font-size: 1rem; outline: none; transition: border-color .2s; }
 .gs-input:focus { border-color: var(--purple); }
@@ -1547,11 +1628,18 @@ body { font-family: var(--vt); font-size: 18px; overflow-x: hidden; }
 .gs-join-btn { font-family: var(--pixel); font-size: .35rem; padding: .3rem .7rem; border: 1px solid var(--purple); color: #a78bfa; background: rgba(124,106,247,.1); cursor: pointer; transition: all .2s; }
 .gs-join-btn:hover { background: rgba(124,106,247,.25); }
 .gs-pending-badge { font-family: var(--pixel); font-size: .35rem; color: #f0b429; border: 1px solid #f0b42944; padding: .3rem .6rem; background: rgba(240,180,41,.08); }
-.gs-empty { text-align: center; padding: 2rem; color: var(--muted); font-size: .9rem; }
+.gs-empty { text-align: center; padding: 2.5rem 1rem; color: var(--muted); font-size: .95rem; line-height: 1.6; }
+.gs-empty strong { color: var(--text); }
 
-/* Buat guild dari no-guild */
-.no-guild-create { text-align: center; }
-.ngc-label { color: var(--muted); font-size: .9rem; margin-bottom: .8rem; }
+/* Buat Guild tab panel */
+.ng-create-panel { padding: 1.5rem 1.5rem; display: flex; flex-direction: column; gap: .6rem; align-items: center; text-align: center; }
+.ng-create-icon { font-size: 2rem; color: var(--gold); opacity: .7; }
+.ng-create-desc { color: var(--muted); font-size: .95rem; max-width: 480px; line-height: 1.6; }
+.ng-create-desc strong { color: var(--gold); }
+.ng-create-field { display: flex; flex-direction: column; gap: .35rem; width: 100%; max-width: 480px; text-align: left; }
+.ng-create-label { font-family: var(--pixel); font-size: .38rem; color: var(--muted); letter-spacing: .1em; }
+.ng-create-input { background: var(--panel2); border: 1px solid var(--border2); color: var(--text); padding: .5rem .7rem; font-family: var(--vt); font-size: 1rem; outline: none; transition: border-color .2s; width: 100%; }
+.ng-create-input:focus { border-color: var(--gold); }
 .ngc-btn { font-size: .45rem; padding: .6rem 1.5rem; border-color: var(--gold); color: var(--gold); background: rgba(255,215,0,.08); }
 .ngc-btn:hover { background: rgba(255,215,0,.18); }
 

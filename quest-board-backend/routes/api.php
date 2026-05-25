@@ -3,6 +3,8 @@
 use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\BoardController;
+use App\Http\Controllers\GuildController;
+
 
 Route::options('{any}', fn() => response()->json([], 200))->where('any', '.*');
 
